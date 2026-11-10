@@ -7,6 +7,7 @@ use iced_runtime::Task;
 use crate::actions::LayerShellCustomActionWithId;
 
 use crate::DefaultStyle;
+use crate::WaylandOutputSnapshot;
 use crate::settings::LayerShellSettings;
 
 use crate::Result;
@@ -660,7 +661,8 @@ impl<P: Program> Daemon<P> {
         P::Message: std::fmt::Debug
             + Send
             + 'static
-            + TryInto<LayerShellCustomActionWithId, Error = P::Message>,
+            + TryInto<LayerShellCustomActionWithId, Error = P::Message>
+            + From<WaylandOutputSnapshot>,
     {
         let settings = self.settings;
         #[cfg(all(feature = "debug", not(target_arch = "wasm32")))]

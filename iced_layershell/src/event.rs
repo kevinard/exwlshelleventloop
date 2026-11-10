@@ -7,6 +7,11 @@ use layershellev::xkb_keyboard::KeyEvent as LayerShellKeyEvent;
 
 use iced_core::keyboard::Modifiers as IcedModifiers;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaylandOutputSnapshot {
+    pub outputs: Vec<String>,
+}
+
 fn from_u32_to_icedmouse(code: u32) -> mouse::Button {
     match code {
         273 => mouse::Button::Right,
@@ -104,6 +109,7 @@ pub enum WindowEvent {
 #[derive(Debug)]
 pub enum IcedLayerShellEvent<Message> {
     UpdateInputRegion(WlRegion),
+    WaylandOutputSnapshot(WaylandOutputSnapshot),
     Window(WindowEvent),
     UserAction(Action<Message>),
     NormalDispatch,
@@ -112,6 +118,9 @@ pub enum IcedLayerShellEvent<Message> {
 impl From<&DispatchMessage> for WindowEvent {
     fn from(value: &DispatchMessage) -> Self {
         match value {
+            DispatchMessage::WaylandOutputSnapshot(_) => {
+                unreachable!("Wayland output snapshots are handled outside WindowEvent")
+            }
             DispatchMessage::RequestRefresh { .. } => WindowEvent::Refresh,
             DispatchMessage::Closed => WindowEvent::Closed,
             DispatchMessage::MouseEnter {
