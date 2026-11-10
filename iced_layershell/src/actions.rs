@@ -105,6 +105,7 @@ pub struct IcedNewMenuSettings {
 }
 
 type Callback = Arc<dyn Fn(&WlRegion) + Send + Sync>;
+type ActivationCallback = Arc<dyn Fn(Option<String>) + Send + Sync>;
 
 /// Reports whether the surface and idle-inhibit protocol were available.
 #[derive(Clone)]
@@ -132,6 +133,24 @@ impl ActionCallback {
         F: Fn(&WlRegion) + Send + Sync + 'static,
     {
         ActionCallback(Arc::new(callback))
+    }
+}
+
+#[derive(Clone)]
+pub struct ActivationTokenCallback(pub ActivationCallback);
+
+impl std::fmt::Debug for ActivationTokenCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "activation token callback function")
+    }
+}
+
+impl ActivationTokenCallback {
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(Option<String>) + Send + Sync + 'static,
+    {
+        ActivationTokenCallback(Arc::new(callback))
     }
 }
 
@@ -174,6 +193,10 @@ pub enum LayerShellCustomAction {
     NewInputPanel {
         settings: NewInputPanelSettings,
         id: IcedId,
+    },
+    RequestActivationToken {
+        app_id: String,
+        callback: ActivationTokenCallback,
     },
     /// is same with WindowAction::Close(id)
     RemoveWindow,

@@ -447,6 +447,7 @@ impl<T> Dispatch<wl_touch::WlTouch, ()> for WindowState<T> {
                     .active_surfaces
                     .insert(Some(id), (surface.clone(), surface_id));
                 state.update_current_surface(Some(surface));
+                state.update_activation_context(serial, surface_id);
                 state.message.push((
                     surface_id,
                     DispatchMessageInner::TouchDown {
@@ -485,6 +486,7 @@ impl<T> Dispatch<wl_touch::WlTouch, ()> for WindowState<T> {
                     })
                     .and_then(|(_, id)| id);
                 let (x, y) = state.finger_locations.remove(&id).unwrap_or_default();
+                state.update_activation_context(serial, surface_id);
                 state.message.push((
                     surface_id,
                     DispatchMessageInner::TouchUp {
@@ -681,6 +683,7 @@ impl<T> Dispatch<wl_pointer::WlPointer, ()> for WindowState<T> {
                 }
                 let mouse_surface = mouse_surface.cloned();
                 state.update_current_surface(mouse_surface);
+                state.update_activation_context(serial, surface_id);
                 state.message.push((
                     surface_id,
                     DispatchMessageInner::MouseButton {

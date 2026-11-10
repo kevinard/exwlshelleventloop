@@ -939,6 +939,16 @@ where
                     Some(iced_id),
                 )));
             }
+            LayerShellCustomAction::RequestActivationToken { app_id, callback } => {
+                if layer_shell_id.is_none()
+                    && let Some(window) = self.window_manager.first()
+                {
+                    layer_shell_id = Some(window.id);
+                }
+                ev.request_activation_token(app_id, layer_shell_id, move |token| {
+                    (callback.0)(token);
+                });
+            }
             LayerShellCustomAction::ForgetLastOutput => {
                 ev.forget_last_output();
             }
