@@ -1187,6 +1187,20 @@ pub(crate) fn run_action<P, C, E: Executor>(
             }
         }
         Action::Window(action) => match action {
+            WindowAction::RedrawAll => {
+                ev.request_refresh_all(RefreshRequest::NextFrame);
+            }
+            WindowAction::RelayoutAll => {
+                // Image workers invalidate layout once an asynchronous load
+                // completes. Without a refresh, idle surfaces keep the frame
+                // drawn before the image was ready until an unrelated event.
+                for (id, window) in window_manager.iter_mut() {
+                    if let Some(ui) = user_interfaces.ui_mut(&id) {
+                        ui.relayout(window.state.viewport().logical_size(), &mut window.renderer);
+                    }
+                }
+                ev.request_refresh_all(RefreshRequest::NextFrame);
+            }
             WindowAction::Close(id) => {
                 waiting_layer_shell_actions.push((Some(id), LayerShellCustomAction::RemoveWindow));
             }
