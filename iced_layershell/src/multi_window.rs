@@ -1245,6 +1245,21 @@ pub(crate) fn run_action<P, C, E: Executor>(
             }
         }
         Action::Window(action) => match action {
+            WindowAction::InhibitKeyboardShortcuts(_,channel)=>{
+                // Layer surfaces are not ordinary keyboard-capture windows.
+                let _=channel.send(None);
+            }
+            WindowAction::EnableDragDrop(_, channel) => {
+                // Layer surfaces do not expose an ordinary-window data device.
+                let _ = channel.send(None);
+            }
+            WindowAction::OpenTransient(_, _, _, channel) | WindowAction::OpenDialog(_, _, _, _, _, channel) => {
+                // Layer surfaces are not ordinary parentable toplevel windows.
+                let _ = channel.send(None);
+            }
+            WindowAction::RequestActivationToken(_, channel) => {
+                let _ = channel.send(None);
+            }
             WindowAction::RedrawAll => {
                 ev.request_refresh_all(RefreshRequest::NextFrame);
             }
