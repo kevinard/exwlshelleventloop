@@ -715,6 +715,11 @@ where
             return;
         }
         match action {
+            LayerShellCustomAction::SetIdleInhibition { enabled, callback } => {
+                let available =
+                    layer_shell_id.is_some_and(|id| ev.set_idle_inhibition(id, enabled));
+                (callback.0)(available);
+            }
             LayerShellCustomAction::AnchorChange(anchor) => {
                 ref_layer_shell_window!(ev, iced_id, layer_shell_id, layer_shell_window);
                 layer_shell_window.set_anchor(anchor);
