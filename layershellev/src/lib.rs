@@ -208,6 +208,10 @@ use wayland_protocols::wp::text_input::zv3::client::{
     zwp_text_input_manager_v3::ZwpTextInputManagerV3,
     zwp_text_input_v3::{self, ContentHint, ContentPurpose, ZwpTextInputV3},
 };
+use wayland_protocols::xdg::activation::v1::client::{
+    xdg_activation_token_v1::{self, XdgActivationTokenV1},
+    xdg_activation_v1::{self, XdgActivationV1},
+};
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
     zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1},
@@ -228,6 +232,29 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::seat::SeatStorage;
+
+struct ActivationTokenCallback(Box<dyn FnOnce(Option<String>) + Send + 'static>);
+
+impl Debug for ActivationTokenCallback {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "activation token callback")
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActivationTokenContext {
+    serial: u32,
+    surface_id: Option<id::Id>,
+    observed: Instant,
+}
+
+#[derive(Debug)]
+struct PendingActivationToken {
+    callback: ActivationTokenCallback,
+    source: id::Id,
+    started: Instant,
+    request: XdgActivationTokenV1,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum LayerEventError {
@@ -925,6 +952,9 @@ pub struct WindowState<T> {
     cursor_manager: Option<WpCursorShapeManagerV1>,
     viewporter: Option<WpViewporter>,
     fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    xdg_activation: Option<XdgActivationV1>,
+    pending_activation_tokens: HashMap<ObjectId, PendingActivationToken>,
+    last_activation_context: Option<ActivationTokenContext>,
     globals: Option<GlobalList>,
 
     // background
@@ -1477,6 +1507,9 @@ impl<T> Default for WindowState<T> {
             cursor_manager: None,
             viewporter: None,
             xdg_output_manager: None,
+            xdg_activation: None,
+            pending_activation_tokens: HashMap::new(),
+            last_activation_context: None,
             globals: None,
             fractional_scale_manager: None,
             virtual_keyboard: None,
@@ -1550,6 +1583,77 @@ impl<T> WindowState<T> {
     /// use [id::Id] to get the immutable [WindowStateUnit]
     pub fn get_unit_with_id(&self, id: id::Id) -> Option<&WindowStateUnit<T>> {
         self.units.iter().find(|unit| unit.id == id)
+    }
+
+    pub fn request_activation_token<F>(
+        &mut self,
+        app_id: String,
+        surface_id: Option<id::Id>,
+        callback: F,
+    ) where
+        T: 'static,
+        F: FnOnce(Option<String>) + Send + 'static,
+    {
+        // Cancellation of a consumer cannot make retained protocol callbacks
+        // unbounded. Reap expired/retired requests before admitting another one.
+        let expired: Vec<_> = self.pending_activation_tokens.iter()
+            .filter(|(_, pending)| pending.started.elapsed() >= Duration::from_secs(1)
+                || self.get_unit_with_id(pending.source).is_none())
+            .map(|(id, _)| id.clone()).collect();
+        for id in expired {
+            if let Some(pending) = self.pending_activation_tokens.remove(&id) {
+                pending.request.destroy();
+                (pending.callback.0)(None);
+            }
+        }
+        if self.pending_activation_tokens.len() >= 64 { callback(None); return; }
+        let Some(activation) = self.xdg_activation.as_ref().cloned() else {
+            callback(None);
+            return;
+        };
+        let Some(context) = self.last_activation_context else {
+            callback(None);
+            return;
+        };
+        if context.observed.elapsed() >= Duration::from_secs(2) { callback(None); return; }
+        let target_surface_id = surface_id.or(context.surface_id);
+        if target_surface_id != context.surface_id {
+            callback(None);
+            return;
+        }
+        let Some(source) = target_surface_id else { callback(None); return; };
+        let Some(surface) = self.get_unit_with_id(source)
+            .map(WindowStateUnit::get_wlsurface)
+            .cloned()
+        else {
+            callback(None);
+            return;
+        };
+        let Some(seat) = self.seat_back.as_ref().cloned() else {
+            callback(None);
+            return;
+        };
+        let Some(qh) = self.units.first().map(|unit| unit.qh.clone()) else {
+            callback(None);
+            return;
+        };
+
+        let token_request = activation.get_activation_token(&qh, ());
+        if !app_id.is_empty() {
+            token_request.set_app_id(app_id);
+        }
+        token_request.set_serial(context.serial, &seat);
+        token_request.set_surface(&surface);
+        token_request.commit();
+        self.pending_activation_tokens.insert(
+            token_request.id(),
+            PendingActivationToken { callback: ActivationTokenCallback(Box::new(callback)),
+                source, started: Instant::now(), request: token_request },
+        );
+    }
+
+    pub(crate) fn update_activation_context(&mut self, serial: u32, surface_id: Option<id::Id>) {
+        self.last_activation_context = Some(ActivationTokenContext { serial, surface_id, observed: Instant::now() });
     }
 
     /// it return the iter of units. you can do loop with it
@@ -2091,6 +2195,38 @@ impl<T> Dispatch<WlCallback, (id::Id, PresentAvailableState)> for WindowState<T>
     }
 }
 
+impl<T> Dispatch<XdgActivationV1, ()> for WindowState<T> {
+    fn event(
+        _state: &mut Self,
+        _proxy: &XdgActivationV1,
+        _event: xdg_activation_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl<T> Dispatch<XdgActivationTokenV1, ()> for WindowState<T> {
+    fn event(
+        state: &mut Self,
+        proxy: &XdgActivationTokenV1,
+        event: xdg_activation_token_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        if let xdg_activation_token_v1::Event::Done { token } = event {
+            if let Some(pending) = state.pending_activation_tokens.remove(&proxy.id()) {
+                let eligible = pending.started.elapsed() < Duration::from_secs(1)
+                    && state.get_unit_with_id(pending.source).is_some();
+                (pending.callback.0)(eligible.then_some(token));
+                proxy.destroy();
+            }
+        }
+    }
+}
+
 delegate_noop!(@<T> WindowState<T>: ignore WlCompositor); // WlCompositor is need to create a surface
 delegate_noop!(@<T> WindowState<T>: ignore WlOutput); // output is need to place layer_shell, although here
 // it is not used
@@ -2170,6 +2306,9 @@ impl<T: 'static> WindowState<T> {
 
         let wmbase = globals.bind::<XdgWmBase, _, _>(&qh, 2..=6, ())?;
         self.wmbase = Some(wmbase);
+
+        let xdg_activation = globals.bind::<XdgActivationV1, _, _>(&qh, 1..=1, ()).ok();
+        self.xdg_activation = xdg_activation;
 
         let cursor_manager = globals
             .bind::<WpCursorShapeManagerV1, _, _>(&qh, 1..=1, ())
