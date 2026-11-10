@@ -100,3 +100,23 @@ manyhow = { version = "0.11.4", features = ["darling"] }
 proc-macro2 = "1.0.89"
 quote = "1.0.37"
 syn = { version = "2.0.87", features = ["full"] }
+
+# Canopa: the iced fork adds window actions that iced_layershell answers.
+# Every iced crate in the lockfile comes from the same fork commit, so there
+# is a single copy of each iced type; winit matches the iced fork's own pin.
+[patch.crates-io]
+iced = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_beacon = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_core = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_debug = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_devtools = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_futures = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_graphics = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_program = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_renderer = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_runtime = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_tiny_skia = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_wgpu = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_widget = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+iced_winit = { git = "https://github.com/kevinard/iced", rev = "af379ca087c56c79f2b6431a219c33407218b130" }
+winit = { git = "https://github.com/kevinard/winit", rev = "5bbfe4f201cc538e426c5ca9bbf4842add9fd870" }
