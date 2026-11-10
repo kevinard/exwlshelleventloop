@@ -204,6 +204,10 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
 };
 
+use wayland_protocols::wp::idle_inhibit::zv1::client::{
+    zwp_idle_inhibit_manager_v1::{self, ZwpIdleInhibitManagerV1},
+    zwp_idle_inhibitor_v1::{self, ZwpIdleInhibitorV1},
+};
 use wayland_protocols::wp::text_input::zv3::client::{
     zwp_text_input_manager_v3::ZwpTextInputManagerV3,
     zwp_text_input_v3::{self, ContentHint, ContentPurpose, ZwpTextInputV3},
@@ -437,6 +441,7 @@ impl<T> WindowStateUnitBuilder<T> {
                 qh,
                 display,
                 wl_surface,
+                idle_inhibitor: None,
                 shell,
                 parent: None,
                 size: (0, 0),
@@ -523,11 +528,21 @@ struct WindowStateUnitRequestFlag {
 }
 
 #[derive(Debug)]
+struct IdleInhibitor(ZwpIdleInhibitorV1);
+
+impl Drop for IdleInhibitor {
+    fn drop(&mut self) {
+        self.0.destroy();
+    }
+}
+
+#[derive(Debug)]
 pub struct WindowStateUnit<T> {
     id: id::Id,
     qh: QueueHandle<WindowState<T>>,
     display: WlDisplay,
     wl_surface: WlSurface,
+    idle_inhibitor: Option<IdleInhibitor>,
     size: (u32, u32),
     buffer: Option<WlBuffer>,
     shell: Shell,
@@ -925,6 +940,7 @@ pub struct WindowState<T> {
     cursor_manager: Option<WpCursorShapeManagerV1>,
     viewporter: Option<WpViewporter>,
     fractional_scale_manager: Option<WpFractionalScaleManagerV1>,
+    idle_inhibit_manager: Option<ZwpIdleInhibitManagerV1>,
     globals: Option<GlobalList>,
 
     // background
@@ -1014,6 +1030,7 @@ impl<T> WindowState<T> {
             .iter()
             .position(|unit| unit.id == id && unit.becreated)?;
 
+        self.units[index].idle_inhibitor = None;
         self.units[index].shell.destroy();
         self.units[index].wl_surface.destroy();
 
@@ -1477,6 +1494,7 @@ impl<T> Default for WindowState<T> {
             cursor_manager: None,
             viewporter: None,
             xdg_output_manager: None,
+            idle_inhibit_manager: None,
             globals: None,
             fractional_scale_manager: None,
             virtual_keyboard: None,
@@ -1550,6 +1568,33 @@ impl<T> WindowState<T> {
     /// use [id::Id] to get the immutable [WindowStateUnit]
     pub fn get_unit_with_id(&self, id: id::Id) -> Option<&WindowStateUnit<T>> {
         self.units.iter().find(|unit| unit.id == id)
+    }
+
+    /// Set an inhibitor owned by this surface. Returns false when the protocol
+    /// or surface is unavailable. Repeated requests do not create duplicates.
+    pub fn set_idle_inhibition(&mut self, surface_id: id::Id, enabled: bool) -> bool
+    where
+        T: 'static,
+    {
+        let manager = self.idle_inhibit_manager.clone();
+        let Some(unit) = self.get_mut_unit_with_id(surface_id) else {
+            return false;
+        };
+        if !enabled {
+            unit.idle_inhibitor = None;
+            return manager.is_some();
+        }
+        let Some(manager) = manager else {
+            return false;
+        };
+        if unit.idle_inhibitor.is_none() {
+            unit.idle_inhibitor = Some(IdleInhibitor(manager.create_inhibitor(
+                &unit.wl_surface,
+                &unit.qh,
+                (),
+            )));
+        }
+        true
     }
 
     /// it return the iter of units. you can do loop with it
@@ -2091,6 +2136,30 @@ impl<T> Dispatch<WlCallback, (id::Id, PresentAvailableState)> for WindowState<T>
     }
 }
 
+impl<T> Dispatch<ZwpIdleInhibitManagerV1, ()> for WindowState<T> {
+    fn event(
+        _: &mut Self,
+        _: &ZwpIdleInhibitManagerV1,
+        _: zwp_idle_inhibit_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl<T> Dispatch<ZwpIdleInhibitorV1, ()> for WindowState<T> {
+    fn event(
+        _: &mut Self,
+        _: &ZwpIdleInhibitorV1,
+        _: zwp_idle_inhibitor_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 delegate_noop!(@<T> WindowState<T>: ignore WlCompositor); // WlCompositor is need to create a surface
 delegate_noop!(@<T> WindowState<T>: ignore WlOutput); // output is need to place layer_shell, although here
 // it is not used
@@ -2170,6 +2239,10 @@ impl<T: 'static> WindowState<T> {
 
         let wmbase = globals.bind::<XdgWmBase, _, _>(&qh, 2..=6, ())?;
         self.wmbase = Some(wmbase);
+
+        self.idle_inhibit_manager = globals
+            .bind::<ZwpIdleInhibitManagerV1, _, _>(&qh, 1..=1, ())
+            .ok();
 
         let cursor_manager = globals
             .bind::<WpCursorShapeManagerV1, _, _>(&qh, 1..=1, ())
