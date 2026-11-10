@@ -5,7 +5,15 @@ use super::*;
 struct EmptyDaemon;
 
 #[derive(Debug)]
-enum Message {}
+enum Message {
+    OutputsChanged,
+}
+
+impl From<WaylandOutputSnapshot> for Message {
+    fn from(_: WaylandOutputSnapshot) -> Self {
+        Self::OutputsChanged
+    }
+}
 
 impl TryInto<LayerShellCustomActionWithId> for Message {
     type Error = Self;

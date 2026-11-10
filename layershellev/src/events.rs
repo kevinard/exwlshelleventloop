@@ -265,6 +265,7 @@ pub enum Ime {
 #[derive(Debug, Clone)]
 pub(crate) enum DispatchMessageInner {
     NewDisplay(WlOutput),
+    WaylandOutputSnapshot(Vec<String>),
     MouseButton {
         state: WEnum<ButtonState>,
         serial: u32,
@@ -344,6 +345,8 @@ pub(crate) enum DispatchMessageInner {
 /// This tell the DispatchMessage by dispatch
 #[derive(Debug)]
 pub enum DispatchMessage {
+    /// Current named Wayland outputs observed by layer-shell.
+    WaylandOutputSnapshot(Vec<String>),
     /// forward the event of wayland-mouse
     MouseButton {
         state: WEnum<ButtonState>,
@@ -443,6 +446,9 @@ impl From<DispatchMessageInner> for DispatchMessage {
     fn from(val: DispatchMessageInner) -> Self {
         match val {
             DispatchMessageInner::NewDisplay(_) => unimplemented!(),
+            DispatchMessageInner::WaylandOutputSnapshot(outputs) => {
+                DispatchMessage::WaylandOutputSnapshot(outputs)
+            }
             DispatchMessageInner::MouseButton {
                 state,
                 serial,
