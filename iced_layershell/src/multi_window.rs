@@ -891,6 +891,13 @@ where
                     Some(iced_id),
                 )));
             }
+            LayerShellCustomAction::RequestActivationToken { app_id, callback } => {
+                // Without a window id, layershellev uses the surface that
+                // received the input, not the first window.
+                ev.request_activation_token(app_id, layer_shell_id, move |token| {
+                    (callback.0)(token);
+                });
+            }
             LayerShellCustomAction::ForgetLastOutput => {
                 ev.forget_last_output();
             }
