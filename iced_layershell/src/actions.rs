@@ -194,6 +194,10 @@ pub enum LayerShellCustomAction {
         settings: NewInputPanelSettings,
         id: IcedId,
     },
+    /// Requests an xdg-activation token from the latest pointer button, touch
+    /// or key event. With a window id, that input must have been on the
+    /// window; without one, the window that received it is used. The callback
+    /// gets `None` when no recent input can authorise the request.
     RequestActivationToken {
         app_id: String,
         callback: ActivationTokenCallback,

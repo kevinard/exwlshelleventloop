@@ -195,7 +195,9 @@ impl<T: 'static> SeatHandler for WindowState<T> {
                 }
             }
             SeatCapability::Keyboard => {
-                seat_state.keyboard_state = None;
+                if let Some(keyboard_state) = seat_state.keyboard_state.take() {
+                    self.keyboard_focus.remove(&keyboard_state.keyboard.id());
+                }
             }
             _ => (),
         }
@@ -240,6 +242,8 @@ impl<T> Dispatch<wl_keyboard::WlKeyboard, ()> for WindowState<T> {
                 _ => unreachable!(),
             },
             wl_keyboard::Event::Enter { surface, .. } => {
+                let focus = state.get_id_from_surface(&surface);
+                state.keyboard_focus.insert(wl_keyboard.id(), focus);
                 state.update_current_surface(Some(surface));
                 let Some(keyboard_state) = state
                     .seats
@@ -259,6 +263,7 @@ impl<T> Dispatch<wl_keyboard::WlKeyboard, ()> for WindowState<T> {
                 }
             }
             wl_keyboard::Event::Leave { .. } => {
+                state.keyboard_focus.remove(&wl_keyboard.id());
                 let Some(keyboard_state) = state
                     .seats
                     .values_mut()
@@ -286,6 +291,7 @@ impl<T> Dispatch<wl_keyboard::WlKeyboard, ()> for WindowState<T> {
                 }
             }
             wl_keyboard::Event::Key {
+                serial,
                 state: keystate,
                 key,
                 ..
@@ -297,6 +303,14 @@ impl<T> Dispatch<wl_keyboard::WlKeyboard, ()> for WindowState<T> {
                         return;
                     }
                 };
+                // Key events go to the surface this keyboard entered, which a
+                // later click elsewhere does not change.
+                let focus = state
+                    .keyboard_focus
+                    .get(&wl_keyboard.id())
+                    .copied()
+                    .unwrap_or(surface_id);
+                state.update_activation_context(serial, focus);
                 let key = key + 8;
 
                 let Some(keyboard_state) = state

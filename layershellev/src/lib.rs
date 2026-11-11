@@ -245,11 +245,37 @@ impl Debug for ActivationTokenCallback {
     }
 }
 
+/// The latest user input that can authorise an xdg-activation token: a pointer
+/// button, a touch down/up or a keyboard key event.
 #[derive(Clone, Copy, Debug)]
 struct ActivationTokenContext {
     serial: u32,
     surface_id: Option<id::Id>,
     observed: Instant,
+}
+
+/// Input older than this cannot authorise a token request.
+const ACTIVATION_INPUT_WINDOW: Duration = Duration::from_secs(2);
+/// A token that arrives this long after its request is dropped.
+const ACTIVATION_REPLY_LIMIT: Duration = Duration::from_secs(1);
+/// At most this many token requests stay pending.
+const MAX_PENDING_ACTIVATION_TOKENS: usize = 64;
+
+impl ActivationTokenContext {
+    /// Returns the serial and surface a token request for `requested` must use,
+    /// or `None` when the input cannot authorise it: it is too old, it was not
+    /// on a known surface, or it was on another surface than `requested`.
+    /// Without a requested surface, the surface that received the input is used.
+    fn authorise(&self, requested: Option<id::Id>, now: Instant) -> Option<(u32, id::Id)> {
+        if now.saturating_duration_since(self.observed) >= ACTIVATION_INPUT_WINDOW {
+            return None;
+        }
+        let source = self.surface_id?;
+        if requested.is_some_and(|requested| requested != source) {
+            return None;
+        }
+        Some((self.serial, source))
+    }
 }
 
 #[derive(Debug)]
@@ -258,6 +284,10 @@ struct PendingActivationToken {
     source: id::Id,
     started: Instant,
     request: XdgActivationTokenV1,
+}
+
+fn activation_reply_expired(started: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(started) >= ACTIVATION_REPLY_LIMIT
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -971,6 +1001,9 @@ pub struct WindowState<T> {
     idle_inhibit_manager: Option<ZwpIdleInhibitManagerV1>,
     pending_activation_tokens: HashMap<ObjectId, PendingActivationToken>,
     last_activation_context: Option<ActivationTokenContext>,
+    /// The surface each `wl_keyboard` has entered, for the activation context
+    /// of its key events.
+    keyboard_focus: HashMap<ObjectId, Option<id::Id>>,
     globals: Option<GlobalList>,
 
     // background
@@ -1546,6 +1579,7 @@ impl<T> Default for WindowState<T> {
             idle_inhibit_manager: None,
             pending_activation_tokens: HashMap::new(),
             last_activation_context: None,
+            keyboard_focus: HashMap::new(),
             globals: None,
             fractional_scale_manager: None,
             virtual_keyboard: None,
@@ -1659,33 +1693,39 @@ impl<T> WindowState<T> {
     {
         // Cancellation of a consumer cannot make retained protocol callbacks
         // unbounded. Reap expired/retired requests before admitting another one.
-        let expired: Vec<_> = self.pending_activation_tokens.iter()
-            .filter(|(_, pending)| pending.started.elapsed() >= Duration::from_secs(1)
-                || self.get_unit_with_id(pending.source).is_none())
-            .map(|(id, _)| id.clone()).collect();
+        let now = Instant::now();
+        let expired: Vec<_> = self
+            .pending_activation_tokens
+            .iter()
+            .filter(|(_, pending)| {
+                activation_reply_expired(pending.started, now)
+                    || self.get_unit_with_id(pending.source).is_none()
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
         for id in expired {
             if let Some(pending) = self.pending_activation_tokens.remove(&id) {
                 pending.request.destroy();
                 (pending.callback.0)(None);
             }
         }
-        if self.pending_activation_tokens.len() >= 64 { callback(None); return; }
+        if self.pending_activation_tokens.len() >= MAX_PENDING_ACTIVATION_TOKENS {
+            callback(None);
+            return;
+        }
         let Some(activation) = self.xdg_activation.as_ref().cloned() else {
             callback(None);
             return;
         };
-        let Some(context) = self.last_activation_context else {
+        let Some((serial, source)) = self
+            .last_activation_context
+            .and_then(|context| context.authorise(surface_id, now))
+        else {
             callback(None);
             return;
         };
-        if context.observed.elapsed() >= Duration::from_secs(2) { callback(None); return; }
-        let target_surface_id = surface_id.or(context.surface_id);
-        if target_surface_id != context.surface_id {
-            callback(None);
-            return;
-        }
-        let Some(source) = target_surface_id else { callback(None); return; };
-        let Some(surface) = self.get_unit_with_id(source)
+        let Some(surface) = self
+            .get_unit_with_id(source)
             .map(WindowStateUnit::get_wlsurface)
             .cloned()
         else {
@@ -1705,18 +1745,28 @@ impl<T> WindowState<T> {
         if !app_id.is_empty() {
             token_request.set_app_id(app_id);
         }
-        token_request.set_serial(context.serial, &seat);
+        token_request.set_serial(serial, &seat);
         token_request.set_surface(&surface);
         token_request.commit();
         self.pending_activation_tokens.insert(
             token_request.id(),
-            PendingActivationToken { callback: ActivationTokenCallback(Box::new(callback)),
-                source, started: Instant::now(), request: token_request },
+            PendingActivationToken {
+                callback: ActivationTokenCallback(Box::new(callback)),
+                source,
+                started: Instant::now(),
+                request: token_request,
+            },
         );
     }
 
+    /// Records user input that can authorise a later token request: a pointer
+    /// button, a touch down/up or a keyboard key, with the surface it was on.
     pub(crate) fn update_activation_context(&mut self, serial: u32, surface_id: Option<id::Id>) {
-        self.last_activation_context = Some(ActivationTokenContext { serial, surface_id, observed: Instant::now() });
+        self.last_activation_context = Some(ActivationTokenContext {
+            serial,
+            surface_id,
+            observed: Instant::now(),
+        });
     }
 
     /// it return the iter of units. you can do loop with it
@@ -2310,7 +2360,7 @@ impl<T> Dispatch<XdgActivationTokenV1, ()> for WindowState<T> {
     ) {
         if let xdg_activation_token_v1::Event::Done { token } = event {
             if let Some(pending) = state.pending_activation_tokens.remove(&proxy.id()) {
-                let eligible = pending.started.elapsed() < Duration::from_secs(1)
+                let eligible = !activation_reply_expired(pending.started, Instant::now())
                     && state.get_unit_with_id(pending.source).is_some();
                 (pending.callback.0)(eligible.then_some(token));
                 proxy.destroy();
@@ -3487,5 +3537,337 @@ fn set_cursor_shape<T: 'static>(
             hotspot_y as i32,
         );
         cursor_surface.commit();
+    }
+}
+
+#[cfg(test)]
+mod activation_token_tests {
+    use super::*;
+
+    fn context(
+        serial: u32,
+        surface_id: Option<id::Id>,
+        observed: Instant,
+    ) -> ActivationTokenContext {
+        ActivationTokenContext {
+            serial,
+            surface_id,
+            observed,
+        }
+    }
+
+    #[test]
+    fn recorded_input_keeps_its_serial_and_surface() {
+        let surface = id::Id::unique();
+        let mut state = WindowState::<()>::default();
+        assert!(state.last_activation_context.is_none());
+
+        state.update_activation_context(7, Some(surface));
+        state.update_activation_context(8, Some(surface));
+
+        let recorded = state.last_activation_context.unwrap();
+        assert_eq!(recorded.serial, 8);
+        assert_eq!(recorded.surface_id, Some(surface));
+        assert_eq!(
+            recorded.authorise(Some(surface), Instant::now()),
+            Some((8, surface))
+        );
+    }
+
+    #[test]
+    fn request_without_window_uses_the_surface_that_received_input() {
+        let first = id::Id::unique();
+        let focused = id::Id::unique();
+        let now = Instant::now();
+        let input = context(12, Some(focused), now);
+
+        assert_eq!(input.authorise(None, now), Some((12, focused)));
+        assert_eq!(input.authorise(Some(focused), now), Some((12, focused)));
+        assert_eq!(input.authorise(Some(first), now), None);
+    }
+
+    #[test]
+    fn input_outside_a_known_surface_authorises_nothing() {
+        let now = Instant::now();
+        let input = context(3, None, now);
+
+        assert_eq!(input.authorise(None, now), None);
+        assert_eq!(input.authorise(Some(id::Id::unique()), now), None);
+    }
+
+    #[test]
+    fn input_expires_after_two_seconds() {
+        let surface = id::Id::unique();
+        let observed = Instant::now();
+        let input = context(5, Some(surface), observed);
+
+        let just_inside = observed + ACTIVATION_INPUT_WINDOW - Duration::from_millis(1);
+        assert_eq!(input.authorise(None, just_inside), Some((5, surface)));
+        assert_eq!(
+            input.authorise(None, observed + ACTIVATION_INPUT_WINDOW),
+            None
+        );
+        assert_eq!(
+            input.authorise(None, observed + Duration::from_secs(10)),
+            None
+        );
+    }
+
+    #[test]
+    fn replies_expire_after_one_second() {
+        let started = Instant::now();
+
+        assert!(!activation_reply_expired(started, started));
+        assert!(!activation_reply_expired(
+            started,
+            started + ACTIVATION_REPLY_LIMIT - Duration::from_millis(1)
+        ));
+        assert!(activation_reply_expired(
+            started,
+            started + ACTIVATION_REPLY_LIMIT
+        ));
+    }
+
+    #[test]
+    fn expiry_rules_are_unchanged() {
+        assert_eq!(ACTIVATION_INPUT_WINDOW, Duration::from_secs(2));
+        assert_eq!(ACTIVATION_REPLY_LIMIT, Duration::from_secs(1));
+        assert_eq!(MAX_PENDING_ACTIVATION_TOKENS, 64);
+    }
+
+    #[test]
+    fn request_without_protocol_answers_none() {
+        let surface = id::Id::unique();
+        let mut state = WindowState::<()>::default();
+        state.update_activation_context(9, Some(surface));
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        state.request_activation_token(String::new(), None, move |token| {
+            sender.send(token).unwrap();
+        });
+        assert_eq!(receiver.try_recv(), Ok(None));
+        assert!(state.pending_activation_tokens.is_empty());
+    }
+}
+
+/// Drives real `wl_keyboard` events through the seat handlers. The proxies are
+/// created client-side over a socket pair; no compositor is involved.
+#[cfg(test)]
+mod keyboard_activation_tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Arc;
+    use wayland_backend::client::{Backend, ObjectData};
+    use wayland_client::WEnum;
+    use wayland_client::protocol::{wl_compositor, wl_display, wl_keyboard, wl_registry, wl_seat};
+
+    struct Ignore;
+
+    impl ObjectData for Ignore {
+        fn event(
+            self: Arc<Self>,
+            _backend: &Backend,
+            _msg: wayland_backend::protocol::Message<ObjectId, std::os::fd::OwnedFd>,
+        ) -> Option<Arc<dyn ObjectData>> {
+            None
+        }
+
+        fn destroyed(&self, _object_id: ObjectId) {}
+    }
+
+    struct Client {
+        _server: UnixStream,
+        conn: Connection,
+        qh: QueueHandle<WindowState<()>>,
+        compositor: WlCompositor,
+        layer_shell: ZwlrLayerShellV1,
+        keyboard: wl_keyboard::WlKeyboard,
+    }
+
+    impl Client {
+        fn new() -> Self {
+            let (client, server) = UnixStream::pair().unwrap();
+            let conn = Connection::from_socket(client).unwrap();
+            let queue = conn.new_event_queue::<WindowState<()>>();
+            let qh = queue.handle();
+            let registry: wl_registry::WlRegistry = conn
+                .display()
+                .send_constructor(wl_display::Request::GetRegistry {}, Arc::new(Ignore))
+                .unwrap();
+            let compositor: WlCompositor = Self::bind(&registry, 1, 4);
+            let layer_shell: ZwlrLayerShellV1 = Self::bind(&registry, 2, 4);
+            let seat: WlSeat = Self::bind(&registry, 3, 7);
+            let keyboard = seat
+                .send_constructor(wl_seat::Request::GetKeyboard {}, Arc::new(Ignore))
+                .unwrap();
+            Self {
+                _server: server,
+                conn,
+                qh,
+                compositor,
+                layer_shell,
+                keyboard,
+            }
+        }
+
+        fn bind<I: Proxy>(registry: &wl_registry::WlRegistry, name: u32, version: u32) -> I {
+            registry
+                .send_constructor(
+                    wl_registry::Request::Bind {
+                        name,
+                        id: (I::interface(), version),
+                    },
+                    Arc::new(Ignore),
+                )
+                .unwrap()
+        }
+
+        fn add_unit(&self, state: &mut WindowState<()>) -> (id::Id, WlSurface) {
+            let surface: WlSurface = self
+                .compositor
+                .send_constructor(wl_compositor::Request::CreateSurface {}, Arc::new(Ignore))
+                .unwrap();
+            let layer: ZwlrLayerSurfaceV1 = self
+                .layer_shell
+                .send_constructor(
+                    wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::Request::GetLayerSurface {
+                        surface: surface.clone(),
+                        output: None,
+                        layer: WEnum::Value(Layer::Top),
+                        namespace: "test".to_owned(),
+                    },
+                    Arc::new(Ignore),
+                )
+                .unwrap();
+            let id = id::Id::unique();
+            state.units.push(WindowStateUnit {
+                id,
+                qh: self.qh.clone(),
+                display: self.conn.display(),
+                wl_surface: surface.clone(),
+                size: (0, 0),
+                buffer: None,
+                shell: Shell::LayerShell(layer),
+                parent: None,
+                zxdgoutput: None,
+                fractional_scale: None,
+                viewport: None,
+                wl_output: None,
+                binding: None,
+                becreated: true,
+                configured: true,
+                scale: 120,
+                request_flag: WindowStateUnitRequestFlag::default(),
+                present_available_state: PresentAvailableState::default(),
+                idle_inhibitor: None,
+            });
+            (id, surface)
+        }
+
+        fn send(&self, state: &mut WindowState<()>, event: wl_keyboard::Event) {
+            <WindowState<()> as Dispatch<wl_keyboard::WlKeyboard, ()>>::event(
+                state,
+                &self.keyboard,
+                event,
+                &(),
+                &self.conn,
+                &self.qh,
+            );
+        }
+
+        fn enter(&self, state: &mut WindowState<()>, serial: u32, surface: &WlSurface) {
+            self.send(
+                state,
+                wl_keyboard::Event::Enter {
+                    serial,
+                    surface: surface.clone(),
+                    keys: Vec::new(),
+                },
+            );
+        }
+
+        fn key(&self, state: &mut WindowState<()>, serial: u32, pressed: bool) {
+            let key_state = if pressed {
+                wl_keyboard::KeyState::Pressed
+            } else {
+                wl_keyboard::KeyState::Released
+            };
+            self.send(
+                state,
+                wl_keyboard::Event::Key {
+                    serial,
+                    time: 0,
+                    key: 28,
+                    state: WEnum::Value(key_state),
+                },
+            );
+        }
+    }
+
+    fn recorded(state: &WindowState<()>) -> Option<(u32, Option<id::Id>)> {
+        state
+            .last_activation_context
+            .map(|context| (context.serial, context.surface_id))
+    }
+
+    #[test]
+    fn key_events_record_their_serial_on_the_focused_surface() {
+        let client = Client::new();
+        let mut state = WindowState::<()>::default();
+        let (panel, panel_surface) = client.add_unit(&mut state);
+
+        client.enter(&mut state, 10, &panel_surface);
+        // Gaining focus is not user input that may activate another app.
+        assert_eq!(recorded(&state), None);
+
+        client.key(&mut state, 11, true);
+        assert_eq!(recorded(&state), Some((11, Some(panel))));
+        client.key(&mut state, 12, false);
+        assert_eq!(recorded(&state), Some((12, Some(panel))));
+
+        let context = state.last_activation_context.unwrap();
+        assert_eq!(context.authorise(None, Instant::now()), Some((12, panel)));
+        assert_eq!(
+            context.authorise(Some(panel), Instant::now()),
+            Some((12, panel))
+        );
+    }
+
+    #[test]
+    fn key_events_stay_on_the_keyboard_surface_after_a_click_elsewhere() {
+        let client = Client::new();
+        let mut state = WindowState::<()>::default();
+        let (bar, bar_surface) = client.add_unit(&mut state);
+        let (panel, panel_surface) = client.add_unit(&mut state);
+
+        client.enter(&mut state, 20, &panel_surface);
+        // A pointer click on another surface moves current_surface only.
+        state.update_current_surface(Some(bar_surface));
+        state.update_activation_context(21, Some(bar));
+        assert_eq!(state.current_surface_id(), Some(bar));
+
+        client.key(&mut state, 22, true);
+        assert_eq!(recorded(&state), Some((22, Some(panel))));
+        let context = state.last_activation_context.unwrap();
+        assert_eq!(context.authorise(None, Instant::now()), Some((22, panel)));
+        assert_eq!(context.authorise(Some(bar), Instant::now()), None);
+    }
+
+    #[test]
+    fn leave_forgets_the_keyboard_focus() {
+        let client = Client::new();
+        let mut state = WindowState::<()>::default();
+        let (_, panel_surface) = client.add_unit(&mut state);
+
+        client.enter(&mut state, 30, &panel_surface);
+        assert_eq!(state.keyboard_focus.len(), 1);
+        client.send(
+            &mut state,
+            wl_keyboard::Event::Leave {
+                serial: 31,
+                surface: panel_surface,
+            },
+        );
+        assert!(state.keyboard_focus.is_empty());
     }
 }
