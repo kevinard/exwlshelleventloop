@@ -892,11 +892,8 @@ where
                 )));
             }
             LayerShellCustomAction::RequestActivationToken { app_id, callback } => {
-                if layer_shell_id.is_none()
-                    && let Some(window) = self.window_manager.first()
-                {
-                    layer_shell_id = Some(window.id);
-                }
+                // Without a window id, layershellev uses the surface that
+                // received the input, not the first window.
                 ev.request_activation_token(app_id, layer_shell_id, move |token| {
                     (callback.0)(token);
                 });
