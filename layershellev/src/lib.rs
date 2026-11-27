@@ -204,6 +204,10 @@ use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
 };
 
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::{self, ExtBackgroundEffectManagerV1},
+    ext_background_effect_surface_v1::{self, ExtBackgroundEffectSurfaceV1},
+};
 use wayland_protocols::wp::idle_inhibit::zv1::client::{
     zwp_idle_inhibit_manager_v1::{self, ZwpIdleInhibitManagerV1},
     zwp_idle_inhibitor_v1::{self, ZwpIdleInhibitorV1},
@@ -499,6 +503,7 @@ impl<T> WindowStateUnitBuilder<T> {
                 display,
                 wl_surface,
                 idle_inhibitor: None,
+                background_effect: None,
                 shell,
                 parent: None,
                 size: (0, 0),
@@ -584,6 +589,16 @@ struct WindowStateUnitRequestFlag {
     refresh: RefreshRequest,
 }
 
+/// The surface's background-effect object; destroying it removes the effect.
+#[derive(Debug)]
+struct BackgroundEffect(ExtBackgroundEffectSurfaceV1);
+
+impl Drop for BackgroundEffect {
+    fn drop(&mut self) {
+        self.0.destroy();
+    }
+}
+
 #[derive(Debug)]
 struct IdleInhibitor(ZwpIdleInhibitorV1);
 
@@ -600,6 +615,7 @@ pub struct WindowStateUnit<T> {
     display: WlDisplay,
     wl_surface: WlSurface,
     idle_inhibitor: Option<IdleInhibitor>,
+    background_effect: Option<BackgroundEffect>,
     size: (u32, u32),
     buffer: Option<WlBuffer>,
     shell: Shell,
@@ -1004,6 +1020,9 @@ pub struct WindowState<T> {
     /// The surface each `wl_keyboard` has entered, for the activation context
     /// of its key events.
     keyboard_focus: HashMap<ObjectId, Option<id::Id>>,
+    background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
+    background_blur_available: bool,
+    region_compositor: Option<WlCompositor>,
     globals: Option<GlobalList>,
 
     // background
@@ -1112,6 +1131,8 @@ impl<T> WindowState<T> {
             .position(|unit| unit.id == id && unit.becreated)?;
 
         self.units[index].idle_inhibitor = None;
+        // The effect object must not outlive its surface.
+        self.units[index].background_effect = None;
         self.units[index].shell.destroy();
         self.units[index].wl_surface.destroy();
 
@@ -1582,6 +1603,9 @@ impl<T> Default for WindowState<T> {
             keyboard_focus: HashMap::new(),
             globals: None,
             fractional_scale_manager: None,
+            background_effect_manager: None,
+            background_blur_available: false,
+            region_compositor: None,
             virtual_keyboard: None,
 
             registry_state: None,
@@ -1651,6 +1675,51 @@ impl<T> WindowState<T> {
     }
 
     /// use [id::Id] to get the immutable [WindowStateUnit]
+    /// Whether the compositor currently offers background blur.
+    pub fn background_blur_available(&self) -> bool {
+        self.background_effect_manager.is_some() && self.background_blur_available
+    }
+
+    /// Blur the background behind `rects` (surface-local x, y, width, height)
+    /// of this surface, or remove the effect with `None`. The region applies on
+    /// the surface's next commit, which is requested here. Returns whether the
+    /// compositor offers background blur.
+    pub fn set_blur_region(
+        &mut self,
+        surface_id: id::Id,
+        rects: Option<&[(i32, i32, i32, i32)]>,
+    ) -> bool
+    where
+        T: 'static,
+    {
+        let available = self.background_blur_available();
+        let manager = self.background_effect_manager.clone();
+        let compositor = self.region_compositor.clone();
+        let Some(unit) = self.get_mut_unit_with_id(surface_id) else {
+            return false;
+        };
+        let Some(rects) = rects else {
+            if unit.background_effect.take().is_some() {
+                unit.wl_surface.commit();
+            }
+            return available;
+        };
+        let (Some(manager), Some(compositor)) = (manager, compositor) else {
+            return false;
+        };
+        let effect = unit.background_effect.get_or_insert_with(|| {
+            BackgroundEffect(manager.get_background_effect(&unit.wl_surface, &unit.qh, ()))
+        });
+        let region = compositor.create_region(&unit.qh, ());
+        for &(x, y, width, height) in rects {
+            region.add(x, y, width, height);
+        }
+        effect.0.set_blur_region(Some(&region));
+        region.destroy();
+        unit.wl_surface.commit();
+        available
+    }
+
     pub fn get_unit_with_id(&self, id: id::Id) -> Option<&WindowStateUnit<T>> {
         self.units.iter().find(|unit| unit.id == id)
     }
@@ -2369,6 +2438,35 @@ impl<T> Dispatch<XdgActivationTokenV1, ()> for WindowState<T> {
     }
 }
 
+impl<T> Dispatch<ExtBackgroundEffectManagerV1, ()> for WindowState<T> {
+    fn event(
+        state: &mut Self,
+        _: &ExtBackgroundEffectManagerV1,
+        event: ext_background_effect_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_background_effect_manager_v1::Event::Capabilities { flags } = event {
+            state.background_blur_available = flags.into_result().is_ok_and(|flags| {
+                flags.contains(ext_background_effect_manager_v1::Capability::Blur)
+            });
+        }
+    }
+}
+
+impl<T> Dispatch<ExtBackgroundEffectSurfaceV1, ()> for WindowState<T> {
+    fn event(
+        _: &mut Self,
+        _: &ExtBackgroundEffectSurfaceV1,
+        _: ext_background_effect_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 delegate_noop!(@<T> WindowState<T>: ignore WlCompositor); // WlCompositor is need to create a surface
 delegate_noop!(@<T> WindowState<T>: ignore WlOutput); // output is need to place layer_shell, although here
 // it is not used
@@ -2447,6 +2545,11 @@ impl<T: 'static> WindowState<T> {
         self.seat_back = Some(globals.bind::<WlSeat, _, _>(&qh, 1..=1, ())?);
 
         let wmbase = globals.bind::<XdgWmBase, _, _>(&qh, 2..=6, ())?;
+
+        self.background_effect_manager = globals
+            .bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ())
+            .ok();
+        self.region_compositor = Some(wmcompositer.clone());
         self.wmbase = Some(wmbase);
 
         let xdg_activation = globals.bind::<XdgActivationV1, _, _>(&qh, 1..=1, ()).ok();

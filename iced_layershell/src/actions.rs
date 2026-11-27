@@ -162,6 +162,10 @@ pub enum LayerShellCustomAction {
         enabled: bool,
         callback: IdleInhibitionCallback,
     },
+    /// Blur the background behind these surface-local rectangles (x, y, width,
+    /// height) through ext-background-effect-v1; `None` removes the effect.
+    /// Rounded shapes are approximated by the caller with rectangles.
+    SetBlurRegion(Option<Vec<(i32, i32, i32, i32)>>),
     AnchorChange(Anchor),
     LayerChange(Layer),
     AnchorSizeChange(Anchor, (u32, u32)),
