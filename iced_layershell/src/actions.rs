@@ -129,6 +129,10 @@ impl ActionCallback {
 /// use macro to_layer_message
 #[derive(Debug, Clone)]
 pub enum LayerShellCustomAction {
+    /// Blur the background behind these surface-local rectangles (x, y, width,
+    /// height) through ext-background-effect-v1; `None` removes the effect.
+    /// Rounded shapes are approximated by the caller with rectangles.
+    SetBlurRegion(Option<Vec<(i32, i32, i32, i32)>>),
     AnchorChange(Anchor),
     LayerChange(Layer),
     AnchorSizeChange(Anchor, (u32, u32)),

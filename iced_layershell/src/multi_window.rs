@@ -715,6 +715,11 @@ where
             return;
         }
         match action {
+            LayerShellCustomAction::SetBlurRegion(rects) => {
+                if let Some(id) = layer_shell_id {
+                    ev.set_blur_region(id, rects.as_deref());
+                }
+            }
             LayerShellCustomAction::AnchorChange(anchor) => {
                 ref_layer_shell_window!(ev, iced_id, layer_shell_id, layer_shell_window);
                 layer_shell_window.set_anchor(anchor);
