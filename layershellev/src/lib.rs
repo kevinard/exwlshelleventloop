@@ -3863,6 +3863,7 @@ mod keyboard_activation_tests {
                 request_flag: WindowStateUnitRequestFlag::default(),
                 present_available_state: PresentAvailableState::default(),
                 idle_inhibitor: None,
+                background_effect: None,
             });
             (id, surface)
         }
